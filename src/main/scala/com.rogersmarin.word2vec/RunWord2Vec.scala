@@ -13,7 +13,7 @@ import com.rogersmarin.word2vec.WikiParser._
 object RunWord2Vec {
 
   val WikiDumpFile = "/data/wikipedia-dump/18022015/enwiki-latest-pages-articles.xml"
-  val StopwordsFile = "stopwords.txt"
+  val StopwordsFile = "src/main/resources/stopwords.txt"
 
   def main (args: Array[String]) {
     val sampleSize = 0.1

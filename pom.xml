@@ -169,6 +169,11 @@
             <artifactId>bliki-core</artifactId>
             <version>3.0.19</version>
         </dependency>
+        <dependency>
+	    <groupId>com.google.guava</groupId>
+	    <artifactId>guava</artifactId>
+	    <version>18.0</version>
+       </dependency>
     </dependencies>
 
     <build>
@@ -313,7 +318,11 @@
                 <groupId>net.alchim31.maven</groupId>
                 <artifactId>scala-maven-plugin</artifactId>
             </plugin>
-        </plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-assembly-plugin</artifactId>
+            </plugin>
+       </plugins>
     </build>
 
 
