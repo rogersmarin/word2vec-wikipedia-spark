@@ -18,8 +18,8 @@
 
 package com.rogersmarin.utils;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
+import org.apache.commons.io.Charsets;
+import org.apache.commons.lang.ArrayUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -35,135 +35,212 @@ import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+
 /**
- * NOTE: This is copied over from Mahout. As it's entirely self contained, copying means that we can
- * avoid all of Mahout's dependency baggage.
- *
  * Reads records that are delimited by a specific begin/end tag.
- */
-/**
- * Created by rogerm on 19/02/2015.
  */
 public class XmlInputFormat extends TextInputFormat {
 
-    private static final Logger log = LoggerFactory.getLogger(XmlInputFormat.class);
+  private static final Logger log = LoggerFactory.getLogger(XmlInputFormat.class);
 
-    public static final String START_TAG_KEY = "xmlinput.start";
-    public static final String END_TAG_KEY = "xmlinput.end";
+  public static final String START_TAG_KEY = "xmlinput.start";
+  public static final String END_TAG_KEY = "xmlinput.end";
+
+  @Override
+  public RecordReader<LongWritable, Text> createRecordReader(InputSplit split, TaskAttemptContext context) {
+    try {
+      return new XmlRecordReader((FileSplit) split, context.getConfiguration());
+    } catch (IOException ioe) {
+      log.warn("Error while creating XmlRecordReader", ioe);
+      return null;
+    }
+  }
+
+  /**
+   * XMLRecordReader class to read through a given xml document to output xml blocks as records as specified
+   * by the start tag and end tag
+   * 
+   */
+  public static class XmlRecordReader extends RecordReader<LongWritable, Text> {
+
+    private final byte[] startTag;
+    private final byte[] endTag;
+    private final byte[] space;
+    private final byte[] angleBracket;
+    private final long start;
+    private final long end;
+    private final FSDataInputStream fsin;
+    private final DataOutputBuffer buffer = new DataOutputBuffer();
+    private LongWritable currentKey;
+    private Text currentValue;
+    private byte[] currentStartTag;
+
+    public XmlRecordReader(FileSplit split, Configuration conf) throws IOException {
+      startTag = conf.get(START_TAG_KEY).getBytes(Charsets.UTF_8);
+      endTag = conf.get(END_TAG_KEY).getBytes(Charsets.UTF_8);
+      space = " ".getBytes(Charsets.UTF_8);
+      angleBracket = ">".getBytes(Charsets.UTF_8);
+      // open the file and seek to the start of the split
+      start = split.getStart();
+      end = start + split.getLength();
+      Path file = split.getPath();
+      FileSystem fs = file.getFileSystem(conf);
+      fsin = fs.open(split.getPath());
+      fsin.seek(start);
+    }
+
+    private boolean next(LongWritable key, Text value) throws IOException {
+      if (readUntilStartElement()) {
+        try {
+          buffer.write(currentStartTag);
+          if (readUntilEndElement()) {
+            key.set(fsin.getPos());
+            value.set(buffer.getData(), 0, buffer.getLength());
+            return true;
+          } else {
+            return false;
+          }
+        } finally {
+          buffer.reset();
+        }
+      } else {
+        return false;
+      }
+    }
 
     @Override
-    public RecordReader<LongWritable, Text> createRecordReader(InputSplit split, TaskAttemptContext context) {
-        try {
-            return new XmlRecordReader((FileSplit) split, context.getConfiguration());
-        } catch (IOException ioe) {
-            log.warn("Error while creating XmlRecordReader", ioe);
-            return null;
-        }
+    public void close() throws IOException {
+      fsin.close();
     }
 
-    /**
-     * XMLRecordReader class to read through a given xml document to output xml blocks as records as specified
-     * by the start tag and end tag
-     *
-     */
-    public static class XmlRecordReader extends RecordReader<LongWritable, Text> {
-
-        private final byte[] startTag;
-        private final byte[] endTag;
-        private final long start;
-        private final long end;
-        private final FSDataInputStream fsin;
-        private final DataOutputBuffer buffer = new DataOutputBuffer();
-        private LongWritable currentKey;
-        private Text currentValue;
-
-        public XmlRecordReader(FileSplit split, Configuration conf) throws IOException {
-            startTag = conf.get(START_TAG_KEY).getBytes(StandardCharsets.UTF_8);
-            endTag = conf.get(END_TAG_KEY).getBytes(StandardCharsets.UTF_8);
-
-            // open the file and seek to the start of the split
-            start = split.getStart();
-            end = start + split.getLength();
-            Path file = split.getPath();
-            FileSystem fs = file.getFileSystem(conf);
-            fsin = fs.open(split.getPath());
-            fsin.seek(start);
-        }
-
-        private boolean next(LongWritable key, Text value) throws IOException {
-            if (fsin.getPos() < end && readUntilMatch(startTag, false)) {
-                try {
-                    buffer.write(startTag);
-                    if (readUntilMatch(endTag, true)) {
-                        key.set(fsin.getPos());
-                        value.set(buffer.getData(), 0, buffer.getLength());
-                        return true;
-                    }
-                } finally {
-                    buffer.reset();
-                }
-            }
-            return false;
-        }
-
-        @Override
-        public void close() throws IOException {
-            fsin.close();
-        }
-
-        @Override
-        public float getProgress() throws IOException {
-            return (fsin.getPos() - start) / (float) (end - start);
-        }
-
-        private boolean readUntilMatch(byte[] match, boolean withinBlock) throws IOException {
-            int i = 0;
-            while (true) {
-                int b = fsin.read();
-                // end of file:
-                if (b == -1) {
-                    return false;
-                }
-                // save to buffer:
-                if (withinBlock) {
-                    buffer.write(b);
-                }
-
-                // check if we're matching:
-                if (b == match[i]) {
-                    i++;
-                    if (i >= match.length) {
-                        return true;
-                    }
-                } else {
-                    i = 0;
-                }
-                // see if we've passed the stop point:
-                if (!withinBlock && i == 0 && fsin.getPos() >= end) {
-                    return false;
-                }
-            }
-        }
-
-        @Override
-        public LongWritable getCurrentKey() throws IOException, InterruptedException {
-            return currentKey;
-        }
-
-        @Override
-        public Text getCurrentValue() throws IOException, InterruptedException {
-            return currentValue;
-        }
-
-        @Override
-        public void initialize(InputSplit split, TaskAttemptContext context) throws IOException, InterruptedException {
-        }
-
-        @Override
-        public boolean nextKeyValue() throws IOException, InterruptedException {
-            currentKey = new LongWritable();
-            currentValue = new Text();
-            return next(currentKey, currentValue);
-        }
+    @Override
+    public float getProgress() throws IOException {
+      return (fsin.getPos() - start) / (float) (end - start);
     }
+
+
+
+    private Boolean readUntilStartElement()  throws IOException{
+      currentStartTag = startTag;
+      int i = 0;
+      while (true) {
+        int b = fsin.read();
+        if (b == -1 || (i == 0 && fsin.getPos() > end)) {
+          // End of file or end of split.
+          return false;
+        } else {
+          if (b == startTag[i]) {
+            if (i >= startTag.length - 1) {
+              // Found start tag.
+              return true;
+            } else {
+              // In start tag.
+              i += 1;
+            }
+          } else {
+            if (i == (startTag.length - angleBracket.length) && checkAttributes(b)) {
+              // Found start tag with attributes.
+              return true;
+            } else {
+              // Not in start tag.
+              i = 0;
+            }
+          }
+        }
+      }
+    }
+
+    private Boolean readUntilEndElement()  throws IOException{
+      int si = 0;
+      int ei = 0;
+      int depth = 0;
+      while (true) {
+        int b = fsin.read();
+        if (b == -1) {
+          // End of file (ignore end of split).
+          return false;
+        } else {
+          buffer.write(b);
+          if (b == startTag[si] && b == endTag[ei]) {
+            // In start tag or end tag.
+            si += 1;
+            ei += 1;
+          } else if (b == startTag[si]) {
+            if (si >= startTag.length - 1) {
+              // Found start tag.
+              si = 0;
+              ei = 0;
+              depth += 1;
+            } else {
+              // In start tag.
+              si += 1;
+              ei = 0;
+            }
+          } else if (b == endTag[ei]) {
+            if (ei >= endTag.length - 1) {
+              if (depth == 0) {
+                // Found closing end tag.
+                return true;
+              } else {
+                // Found nested end tag.
+                si = 0;
+                ei = 0;
+                depth -= 1;
+              }
+            } else {
+              // In end tag.
+              si = 0;
+              ei += 1;
+            }
+          } else {
+            // Not in start tag or end tag.
+            si = 0;
+            ei = 0;
+          }
+        }
+      }
+    }
+
+    private Boolean checkAttributes(int current) throws IOException {
+      int len = 0;
+      int b = current;
+      while (len < space.length && b == space[len]) {
+        len += 1;
+        if (len >= space.length) {
+          int totalLength = (startTag.length - angleBracket.length);
+          byte[] tag = new byte[totalLength];
+          for(int i = 0; i <(startTag.length - angleBracket.length); i++){
+            tag[i] = startTag[i];
+          }
+          currentStartTag = ArrayUtils.addAll(tag, space);
+          return true;
+        }
+        b = fsin.read();
+      }
+      return false;
+    }
+
+
+    @Override
+    public LongWritable getCurrentKey() throws IOException, InterruptedException {
+      return currentKey;
+    }
+
+    @Override
+    public Text getCurrentValue() throws IOException, InterruptedException {
+      return currentValue;
+    }
+
+    @Override
+    public void initialize(InputSplit split, TaskAttemptContext context) throws IOException, InterruptedException {
+    }
+
+    @Override
+    public boolean nextKeyValue() throws IOException, InterruptedException {
+      currentKey = new LongWritable();
+      currentValue = new Text();
+      return next(currentKey, currentValue);
+    }
+  }
 }
