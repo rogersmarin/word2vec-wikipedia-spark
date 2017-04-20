@@ -149,6 +149,7 @@ public class XmlInputFormat extends TextInputFormat {
       int i = 0;
       while (true) {
         int b = fsin.read();
+        pos++;
         if (b == -1 || (i == 0 && pos > end)) {
           // End of file or end of split.
           return false;
@@ -180,6 +181,7 @@ public class XmlInputFormat extends TextInputFormat {
       int depth = 0;
       while (true) {
         int b = fsin.read();
+        pos++;
         if (b == -1) {
           // End of file (ignore end of split).
           return false;
@@ -240,6 +242,7 @@ public class XmlInputFormat extends TextInputFormat {
           return true;
         }
         b = fsin.read();
+        pos++;
       }
       return false;
     }
@@ -263,3 +266,4 @@ public class XmlInputFormat extends TextInputFormat {
     }
   }
 }
+
