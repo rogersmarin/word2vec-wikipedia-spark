@@ -27,6 +27,8 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.DataOutputBuffer;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.io.compress.CompressionCodec;
+import org.apache.hadoop.io.compress.CompressionCodecFactory;
 import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.RecordReader;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
@@ -35,6 +37,7 @@ import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.DataInputStream;
 import java.io.IOException;
 
 /**
@@ -49,12 +52,7 @@ public class XmlInputFormat extends TextInputFormat {
 
   @Override
   public RecordReader<LongWritable, Text> createRecordReader(InputSplit split, TaskAttemptContext context) {
-    try {
-      return new XmlRecordReader((FileSplit) split, context.getConfiguration());
-    } catch (IOException ioe) {
-      log.warn("Error while creating XmlRecordReader", ioe);
-      return null;
-    }
+      return new XmlRecordReader();
   }
 
   /**
@@ -64,49 +62,74 @@ public class XmlInputFormat extends TextInputFormat {
    */
   public static class XmlRecordReader extends RecordReader<LongWritable, Text> {
 
-    private final byte[] startTag;
-    private final byte[] endTag;
-    private final byte[] space;
-    private final byte[] angleBracket;
-    private final long start;
-    private final long end;
-    private final FSDataInputStream fsin;
-    private final DataOutputBuffer buffer = new DataOutputBuffer();
+    private byte[] startTag;
+    private byte[] endTag;
+    private byte[] space;
+    private byte[] angleBracket;
+    private long start;
+    private long end;
+    private DataInputStream fsin = null;
+    private DataOutputBuffer buffer = new DataOutputBuffer();
     private LongWritable currentKey;
     private Text currentValue;
     private byte[] currentStartTag;
+    private long recordStartPos;
+    private long pos;
 
-    public XmlRecordReader(FileSplit split, Configuration conf) throws IOException {
+    @Override
+    public void initialize(InputSplit input, TaskAttemptContext context) throws IOException {
+      Configuration conf = context.getConfiguration();
+      FileSplit split = (FileSplit) input;
       startTag = conf.get(START_TAG_KEY).getBytes(Charsets.UTF_8);
       endTag = conf.get(END_TAG_KEY).getBytes(Charsets.UTF_8);
       space = " ".getBytes(Charsets.UTF_8);
       angleBracket = ">".getBytes(Charsets.UTF_8);
       // open the file and seek to the start of the split
       start = split.getStart();
-      end = start + split.getLength();
       Path file = split.getPath();
       FileSystem fs = file.getFileSystem(conf);
-      fsin = fs.open(split.getPath());
-      fsin.seek(start);
+
+      CompressionCodecFactory compressionCodecs = new CompressionCodecFactory(conf);
+      CompressionCodec codec = compressionCodecs.getCodec(file);
+
+      if (codec != null) {
+        fsin = new DataInputStream(codec.createInputStream(fs.open(file)));
+        end = Long.MAX_VALUE;
+      } else {
+        FSDataInputStream fileIn = fs.open(file);
+        fileIn.seek(start);
+        fsin = fileIn;
+        end = start + split.getLength();
+      }
+      
+      recordStartPos = start;
+
+      // Because input streams of gzipped files are not seekable, we need to keep track of bytes
+      // consumed ourselves.
+      pos = start;
     }
 
     private boolean next(LongWritable key, Text value) throws IOException {
-      if (readUntilStartElement()) {
-        try {
-          buffer.write(currentStartTag);
-          if (readUntilEndElement()) {
-            key.set(fsin.getPos());
-            value.set(buffer.getData(), 0, buffer.getLength());
-            return true;
-          } else {
-            return false;
+      if (pos < end) {
+        if (readUntilStartElement()) {
+          recordStartPos = pos - startTag.length;
+          try {
+            buffer.write(currentStartTag);
+            if (readUntilEndElement()) {
+              key.set(recordStartPos);
+              value.set(buffer.getData(), 0, buffer.getLength());
+              return true;
+            } else {
+              return false;
+            }
+          } finally {
+            buffer.reset();
           }
-        } finally {
-          buffer.reset();
+        } else {
+          return false;
         }
-      } else {
-        return false;
       }
+      return false;
     }
 
     @Override
@@ -116,7 +139,7 @@ public class XmlInputFormat extends TextInputFormat {
 
     @Override
     public float getProgress() throws IOException {
-      return (fsin.getPos() - start) / (float) (end - start);
+      return (pos - start) / (float) (end - start);
     }
 
 
@@ -126,7 +149,7 @@ public class XmlInputFormat extends TextInputFormat {
       int i = 0;
       while (true) {
         int b = fsin.read();
-        if (b == -1 || (i == 0 && fsin.getPos() > end)) {
+        if (b == -1 || (i == 0 && pos > end)) {
           // End of file or end of split.
           return false;
         } else {
@@ -231,11 +254,7 @@ public class XmlInputFormat extends TextInputFormat {
     public Text getCurrentValue() throws IOException, InterruptedException {
       return currentValue;
     }
-
-    @Override
-    public void initialize(InputSplit split, TaskAttemptContext context) throws IOException, InterruptedException {
-    }
-
+    
     @Override
     public boolean nextKeyValue() throws IOException, InterruptedException {
       currentKey = new LongWritable();
